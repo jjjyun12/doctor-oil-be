@@ -74,6 +74,7 @@ class Customer(Base):
     email = Column(String, nullable=True, index=True)
     phone = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    deleted_at = Column(DateTime, nullable=True)  # ✅ 회원탈퇴 일자 추적 컬럼 추가
 
     vehicles = relationship(
         "Vehicle",
@@ -157,7 +158,6 @@ if engine:
 # ===============================
 app = FastAPI()
 
-# ✅ 플러터 앱과의 통신을 위한 CORS 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -194,7 +194,7 @@ def get_coords(address: str):
     return None, None
 
 # ===============================
-# 4. 로그인 API
+# 4. 로그인 API (회원탈퇴 검증 로직 추가)
 # ===============================
 @auth_router.post("/login")
 async def login(data: dict, db: Session = Depends(get_db)):
@@ -208,6 +208,10 @@ async def login(data: dict, db: Session = Depends(get_db)):
 
     if not user:
         raise HTTPException(404, "등록되지 않은 사용자입니다.")
+        
+    # ✅ deleted_at이 세팅되어 있으면(탈퇴 상태이면) 로그인 차단
+    if user.deleted_at is not None:
+        raise HTTPException(403, "탈퇴 처리가 완료된 사용자 계정입니다.")
 
     return {
         "status": "success",
@@ -244,6 +248,31 @@ async def signup(data: dict, db: Session = Depends(get_db)):
     db.add(new_customer)
     db.commit()
     return {"status": "success", "customer_id": new_id}
+
+# ===============================
+# 5-1. 회원탈퇴 API (deleted_at 소프트 딜리트 반영)
+# ===============================
+@customer_router.delete("/customers/{customer_id}")
+async def withdraw_customer(customer_id: str, db: Session = Depends(get_db)):
+    customer = db.query(Customer).filter(Customer.id == customer_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="존재하지 않는 사용자입니다.")
+
+    if customer.deleted_at is not None:
+        return {"status": "success", "message": "이미 탈퇴 처리가 완료된 사용자입니다."}
+
+    try:
+        # ✅ 데이터 유지하며 deleted_at 기록, 이름/전화번호 마스킹
+        customer.deleted_at = datetime.now(timezone.utc)
+        customer.name = f"(탈퇴사용자)_{customer.id}"
+        customer.phone = None  
+
+        db.commit()
+        return {"status": "success", "message": "회원탈퇴가 정상 처리되었습니다."}
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"회원탈퇴 처리 중 오류 발생: {str(e)}")
 
 @app.get("/partners", tags=["Customer"])
 async def get_partners(db: Session = Depends(get_db)):
@@ -334,6 +363,27 @@ async def get_vehicle(vehicle_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "차량을 찾을 수 없습니다.")
 
     return vehicle
+
+# ===============================
+# 8-1. 차량 삭제 API (신규 추가)
+# ===============================
+@customer_router.delete("/vehicle/{vehicle_id}")
+async def delete_vehicle(vehicle_id: str, db: Session = Depends(get_db)):
+    clean_id = urllib.parse.unquote(vehicle_id).split("?")[0]
+    if not clean_id.startswith("V-"):
+        clean_id = f"V-{clean_id}"
+
+    vehicle = db.query(Vehicle).filter(Vehicle.id == clean_id).first()
+    if not vehicle:
+        raise HTTPException(404, "차량을 찾을 수 없습니다.")
+
+    try:
+        db.delete(vehicle)
+        db.commit()
+        return {"status": "success", "message": "차량이 성공적으로 삭제되었습니다."}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, detail=f"차량 삭제 중 오류 발생: {str(e)}")
 
 # ===============================
 # 9. 고객별 차량 목록 조회
@@ -515,6 +565,13 @@ async def update_review(reservation_id: int, data: dict, db: Session = Depends(g
     try:
         reservation.stars = float(data.get("stars", 0.0))
         reservation.feedback = data.get("feedback", "")
+        
+        if "is_reported" in data:
+            reservation.is_approved = not data.get("is_reported")
+            
+        if "note" in data:
+            reservation.note = data.get("note", "")
+
         db.flush() 
 
         partner = db.query(Partner).filter(Partner.garage_code == reservation.partner_code).first()
@@ -527,6 +584,7 @@ async def update_review(reservation_id: int, data: dict, db: Session = Depends(g
 
         db.commit()
         return {"status": "success"}
+        
     except Exception as e:
         db.rollback()
         raise HTTPException(500, str(e))
@@ -571,7 +629,7 @@ app.include_router(admin_router)
 app.include_router(customer_router)
 
 # ===============================
-# 17. 서버 실행 블록 (수정 완료)
+# 17. 서버 실행 블록
 # ===============================
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
