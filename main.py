@@ -1,54 +1,41 @@
+# ====================================================================
+# 1. 환경 변수 강제 우선 로드 및 공통 모듈 Import
+# ====================================================================
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+current_dir = Path(__file__).resolve().parent
+env_path = current_dir / ".env"
+
+if env_path.exists():
+    print(f"✅ .env 파일을 성공적으로 찾았습니다: {env_path}")
+    load_dotenv(dotenv_path=env_path)
+else:
+    print(f"🚨 .env 파일이 존재하지 않습니다! 시스템 환경변수를 참조합니다.")
+
+import requests 
+import urllib.parse
+from datetime import datetime, timezone
+import uvicorn
+
 from fastapi import FastAPI, HTTPException, Depends, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import (
-    create_engine, Column, String, Integer, DateTime,
-    ForeignKey, Boolean, Date, Time, Text, Float, func, JSON
+    Column, String, Integer, DateTime, ForeignKey, 
+    Boolean, Date, Time, Text, Float, func, JSON
 )
-from sqlalchemy.orm import sessionmaker, relationship, Session, declarative_base
-from datetime import datetime, timezone, date, time
-import os
-import uvicorn
-import requests 
-import json
-import urllib.parse
+from sqlalchemy.orm import Session, relationship
 
-# ===============================
-# 1. DB 설정 (환경변수)
-# ===============================
-DB_USER = os.getenv("DB_USER")
-DB_PW = os.getenv("DB_PW")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME")
+from database import engine, Base, get_db
+from payment_router import payment_router, PaymentRecord # 💡 결제 테이블 모델 누락 방지 임포트
 
-DATABASE_URL = None
-
-if all([DB_USER, DB_PW, DB_HOST, DB_NAME]):
-    DATABASE_URL = (
-        f"postgresql://{DB_USER}:{DB_PW}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-    )
-else:
-    print("⚠️ DB 환경변수 누락 - DB 연결 없이 서버만 실행됩니다.")
-
-engine = (
-    create_engine(DATABASE_URL, pool_pre_ping=True)
-    if DATABASE_URL
-    else None
-)
-
-SessionLocal = (
-    sessionmaker(bind=engine, autocommit=False, autoflush=False)
-    if engine
-    else None
-)
-
-Base = declarative_base()
-
-# ===============================
-# 2. 테이블 정의
-# ===============================
+# ====================================================================
+# 2. 데이터베이스 서비스 테이블 정의
+# ====================================================================
 class Partner(Base):
     __tablename__ = "partners"
+    __table_args__ = {'extend_existing': True}  
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String)
     email = Column(String, unique=True, index=True)
@@ -66,32 +53,11 @@ class Partner(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
-class Customer(Base):
-    __tablename__ = "customers"
-    id = Column(String, primary_key=True, index=True)
-    partner_code = Column(String, index=True)
-    name = Column(String, nullable=True)
-    email = Column(String, nullable=True, index=True)
-    phone = Column(String, nullable=True)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    deleted_at = Column(DateTime, nullable=True)  # ✅ 회원탈퇴 일자 추적 컬럼 추가
-
-    vehicles = relationship(
-        "Vehicle",
-        back_populates="customer",
-        cascade="all, delete-orphan"
-    )
-
-
 class Vehicle(Base):
     __tablename__ = "vehicles"
+    __table_args__ = {'extend_existing': True}  
     id = Column(String, primary_key=True, index=True)
-    customer_id = Column(
-        String,
-        ForeignKey("customers.id"),
-        nullable=False,
-        index=True
-    )
+    customer_id = Column(String, ForeignKey("customers.id"), nullable=False, index=True)
     plate_number = Column(String, nullable=False)
     brand = Column(String)
     model = Column(String)
@@ -106,11 +72,30 @@ class Vehicle(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(String, default=lambda: datetime.now(timezone.utc).isoformat())
 
-    customer = relationship("Customer", back_populates="vehicles")
+    customer = relationship(lambda: Customer, back_populates="vehicles")
+
+
+class Customer(Base):
+    __tablename__ = "customers"
+    __table_args__ = {'extend_existing': True}  
+    id = Column(String, primary_key=True, index=True)
+    partner_code = Column(String, index=True)
+    name = Column(String, nullable=True)
+    email = Column(String, nullable=True, index=True)
+    phone = Column(String, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    deleted_at = Column(DateTime, nullable=True)  
+
+    vehicles = relationship(
+        lambda: Vehicle,
+        back_populates="customer",
+        cascade="all, delete-orphan"
+    )
 
 
 class Reservation(Base):
     __tablename__ = "reservations"
+    __table_args__ = {'extend_existing': True}  
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     customer_code = Column(String, index=True)
     partner_code = Column(String, index=True)
@@ -128,7 +113,7 @@ class Reservation(Base):
 
 class Analysis(Base):
     __tablename__ = "analysis_results"
-    
+    __table_args__ = {'extend_existing': True}  
     id = Column(Integer, primary_key=True, index=True)
     reading_id = Column(String, index=True)
     scores = Column(JSON)
@@ -136,13 +121,13 @@ class Analysis(Base):
     explanation = Column(Text)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)) 
     plate_number = Column(String(255), index=True)
-    
-    analysis_stars = Column(Float, nullable=True)   # 별점
-    analysis_feedback = Column(Text, nullable=True) # 리뷰 문구
+    analysis_stars = Column(Float, nullable=True)   
+    analysis_feedback = Column(Text, nullable=True) 
 
 
 class UserJourneyLog(Base):
     __tablename__ = "user_journey_logs"
+    __table_args__ = {'extend_existing': True}  
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id = Column(String, index=True)
     page_name = Column(String)
@@ -150,13 +135,36 @@ class UserJourneyLog(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class FreeAnalysisCoupon(Base):
+    __tablename__ = "free_analysis_coupons"
+    __table_args__ = {'extend_existing': True}  
+    
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    batch_id = Column(Integer, nullable=True)
+    partner_code = Column(String(128), nullable=True)
+    coupon_code = Column(String(64), unique=True, index=True, nullable=False)
+    status = Column(String(8), default="ACTIVE")  
+    issued_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    used_at = Column(DateTime(timezone=True), nullable=True)
+    canceled_at = Column(DateTime(timezone=True), nullable=True)
+    cancel_reason = Column(Text, nullable=True)
+    used_by_customer_id = Column(String, ForeignKey("customers.id"), nullable=True, index=True)
+    used_reservation_id = Column(Integer, nullable=True)
+    used_analysis_result_id = Column(Integer, nullable=True)
+    note = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+# 💡 [교정] 모든 릴레이션 관계 테이블이 파이썬 메모리에 완전히 적재된 후 자동 빌드를 시도해야 안전합니다.
 if engine:
     Base.metadata.create_all(bind=engine)
 
-# ===============================
-# 3. FastAPI 설정 및 CORS 추가
-# ===============================
-app = FastAPI()
+# ====================================================================
+# 3. FastAPI Core 설정 및 라우터 초기화
+# ====================================================================
+app = FastAPI(title="Doctor Oil Total Dev Server")
 
 app.add_middleware(
     CORSMiddleware,
@@ -169,15 +177,7 @@ app.add_middleware(
 auth_router = APIRouter(prefix="/auth", tags=["Auth"])
 admin_router = APIRouter(prefix="/admin/api", tags=["Admin"])
 customer_router = APIRouter(tags=["Customer"]) 
-
-def get_db():
-    if not SessionLocal:
-        raise HTTPException(500, "DB 연결이 설정되지 않았습니다.")
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+coupon_router = APIRouter(prefix="/coupons", tags=["Coupon"]) 
 
 def get_coords(address: str):
     if not address: return None, None
@@ -193,9 +193,10 @@ def get_coords(address: str):
         print(f"좌표 변환 실패: {e}")
     return None, None
 
-# ===============================
-# 4. 로그인 API (회원탈퇴 검증 로직 추가)
-# ===============================
+# ====================================================================
+# 4. 엔드포인트 비즈니스 로직 정의
+# ====================================================================
+
 @auth_router.post("/login")
 async def login(data: dict, db: Session = Depends(get_db)):
     email = data.get("email")
@@ -209,7 +210,6 @@ async def login(data: dict, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(404, "등록되지 않은 사용자입니다.")
         
-    # ✅ deleted_at이 세팅되어 있으면(탈퇴 상태이면) 로그인 차단
     if user.deleted_at is not None:
         raise HTTPException(403, "탈퇴 처리가 완료된 사용자 계정입니다.")
 
@@ -219,9 +219,7 @@ async def login(data: dict, db: Session = Depends(get_db)):
         "customer_id": user.id
     }
 
-# ===============================
-# 5. 회원가입 API
-# ===============================
+
 @auth_router.post("/signup")
 async def signup(data: dict, db: Session = Depends(get_db)):
     acc_type = data.get("account_type", "P")
@@ -249,9 +247,7 @@ async def signup(data: dict, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success", "customer_id": new_id}
 
-# ===============================
-# 5-1. 회원탈퇴 API (deleted_at 소프트 딜리트 반영)
-# ===============================
+
 @customer_router.delete("/customers/{customer_id}")
 async def withdraw_customer(customer_id: str, db: Session = Depends(get_db)):
     customer = db.query(Customer).filter(Customer.id == customer_id).first()
@@ -262,7 +258,6 @@ async def withdraw_customer(customer_id: str, db: Session = Depends(get_db)):
         return {"status": "success", "message": "이미 탈퇴 처리가 완료된 사용자입니다."}
 
     try:
-        # ✅ 데이터 유지하며 deleted_at 기록, 이름/전화번호 마스킹
         customer.deleted_at = datetime.now(timezone.utc)
         customer.name = f"(탈퇴사용자)_{customer.id}"
         customer.phone = None  
@@ -273,6 +268,7 @@ async def withdraw_customer(customer_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"회원탈퇴 처리 중 오류 발생: {str(e)}")
+
 
 @app.get("/partners", tags=["Customer"])
 async def get_partners(db: Session = Depends(get_db)):
@@ -289,9 +285,7 @@ async def get_partners(db: Session = Depends(get_db)):
         for p in partners: db.refresh(p)
     return partners
 
-# ===============================
-# 6. 차량 기본 등록
-# ===============================
+
 @customer_router.post("/register-vehicle")
 async def register_vehicle(data: dict, db: Session = Depends(get_db)):
     customer_id = data.get("customer_id")
@@ -325,9 +319,7 @@ async def register_vehicle(data: dict, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success", "vehicle_id": vehicle_id}
 
-# ===============================
-# 7. 차량 상세 설정
-# ===============================
+
 @customer_router.post("/setup/vehicle")
 async def setup_vehicle(data: dict, db: Session = Depends(get_db)):
     v_id = data.get("vehicle_id")
@@ -349,9 +341,7 @@ async def setup_vehicle(data: dict, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success", "vehicle_id": clean_v_id}
 
-# ===============================
-# 8. 차량 단일 조회
-# ===============================
+
 @customer_router.get("/vehicle/{vehicle_id}")
 async def get_vehicle(vehicle_id: str, db: Session = Depends(get_db)):
     clean_id = urllib.parse.unquote(vehicle_id).split("?")[0]
@@ -364,9 +354,7 @@ async def get_vehicle(vehicle_id: str, db: Session = Depends(get_db)):
 
     return vehicle
 
-# ===============================
-# 8-1. 차량 삭제 API (신규 추가)
-# ===============================
+
 @customer_router.delete("/vehicle/{vehicle_id}")
 async def delete_vehicle(vehicle_id: str, db: Session = Depends(get_db)):
     clean_id = urllib.parse.unquote(vehicle_id).split("?")[0]
@@ -385,9 +373,7 @@ async def delete_vehicle(vehicle_id: str, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(500, detail=f"차량 삭제 중 오류 발생: {str(e)}")
 
-# ===============================
-# 9. 고객별 차량 목록 조회
-# ===============================
+
 @customer_router.get("/vehicles")
 @customer_router.get("/vehicles/{customer_id}")
 async def get_vehicles(customer_id: str = None, db: Session = Depends(get_db)):
@@ -398,14 +384,11 @@ async def get_vehicles(customer_id: str = None, db: Session = Depends(get_db)):
 
     return db.query(Vehicle).all()
 
-# ===============================
-# 10. 분석 데이터 조회 API
-# ===============================
+
 @customer_router.get("/analysis/latest/{vehicle_id}")
 async def get_latest_analysis(vehicle_id: str, db: Session = Depends(get_db)):
     decoded_id = urllib.parse.unquote(vehicle_id).split("?")[0].strip()
     clean_plate_number = decoded_id.replace("V-", "").strip()
-    
     target_no_space = clean_plate_number.replace(" ", "")
     
     analysis = (
@@ -414,7 +397,6 @@ async def get_latest_analysis(vehicle_id: str, db: Session = Depends(get_db)):
         .order_by(Analysis.created_at.desc())
         .first()
     )
-    
     if not analysis:
         analysis = (
             db.query(Analysis)
@@ -422,11 +404,10 @@ async def get_latest_analysis(vehicle_id: str, db: Session = Depends(get_db)):
             .order_by(Analysis.created_at.desc())
             .first()
         )
-    
     if not analysis:
         raise HTTPException(404, f"[{clean_plate_number}] 차량의 분석 데이터를 찾을 수 없습니다.")
-        
     return analysis
+
 
 @customer_router.get("/analysis/{analysis_id}")
 async def get_analysis_by_id(analysis_id: int, db: Session = Depends(get_db)):
@@ -435,45 +416,31 @@ async def get_analysis_by_id(analysis_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, f"ID {analysis_id}에 해당하는 결과가 없습니다.")
     return analysis
 
-# ===============================
-# 10-1. 분석 결과 리뷰 업데이트 API
-# ===============================
+
 @customer_router.patch("/analysis/{reading_id}/review")
 async def update_analysis_review(reading_id: str, data: dict, db: Session = Depends(get_db)):
     analysis = db.query(Analysis).filter(Analysis.reading_id == reading_id).first()
-    
     if not analysis:
         raise HTTPException(status_code=404, detail="해당 분석 데이터를 찾을 수 없습니다.")
-
     try:
         analysis.analysis_stars = float(data.get("analysis_stars", 0.0))
         analysis.analysis_feedback = data.get("analysis_feedback", "")
-        
         db.commit()
         return {"status": "success", "message": "분석 리뷰가 성공적으로 등록되었습니다."}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"리뷰 등록 중 오류 발생: {str(e)}")
 
-# ===============================
-# 11. 예약 개수 조회 API
-# ===============================
+
 @customer_router.get("/reserve/count")
-async def get_reservation_count(
-    customer_code: str, 
-    partner_code: str, 
-    db: Session = Depends(get_db)
-):
+async def get_reservation_count(customer_code: str, partner_code: str, db: Session = Depends(get_db)):
     count = db.query(Reservation).filter(
         Reservation.customer_code == customer_code,
         Reservation.partner_code == partner_code
     ).count()
-    
     return {"status": "success", "count": count}
 
-# ===============================
-# 12. 예약 생성
-# ===============================
+
 @customer_router.post("/reserve")
 async def create_reservation(data: dict, db: Session = Depends(get_db)):
     try:
@@ -507,19 +474,15 @@ async def create_reservation(data: dict, db: Session = Depends(get_db)):
             reservation_candidate=data.get("reservation_candidate"),
             created_at=datetime.now(timezone.utc)
         )
-
         db.add(reservation)
         db.commit()
         db.refresh(reservation)
         return {"status": "success", "reservation_id": reservation.id}
-
     except Exception as e:
         db.rollback()
         raise HTTPException(500, str(e))
 
-# ===============================
-# 13. 예약 리스트 조회
-# ===============================
+
 @customer_router.get("/reservations/{customer_id}")
 async def get_reservations(customer_id: str, db: Session = Depends(get_db)):
     results = (
@@ -530,7 +493,6 @@ async def get_reservations(customer_id: str, db: Session = Depends(get_db)):
         .order_by(Reservation.created_at.desc())
         .all()
     )
-
     formatted_results = []
     for r, garage_name, a_stars, a_feedback in results:
         formatted_results.append({
@@ -553,27 +515,20 @@ async def get_reservations(customer_id: str, db: Session = Depends(get_db)):
         })
     return formatted_results
 
-# ===============================
-# 14. 리뷰 등록 및 평점 업데이트
-# ===============================
+
 @customer_router.patch("/reservations/{reservation_id}/review")
 async def update_review(reservation_id: int, data: dict, db: Session = Depends(get_db)):
     reservation = db.query(Reservation).filter(Reservation.id == reservation_id).first()
     if not reservation:
         raise HTTPException(status_code=404, detail="예약 없음")
-
     try:
         reservation.stars = float(data.get("stars", 0.0))
         reservation.feedback = data.get("feedback", "")
-        
         if "is_reported" in data:
             reservation.is_approved = not data.get("is_reported")
-            
         if "note" in data:
             reservation.note = data.get("note", "")
-
         db.flush() 
-
         partner = db.query(Partner).filter(Partner.garage_code == reservation.partner_code).first()
         if partner:
             avg_rating = db.query(func.avg(Reservation.stars)).filter(
@@ -581,21 +536,17 @@ async def update_review(reservation_id: int, data: dict, db: Session = Depends(g
                 Reservation.stars.isnot(None)
             ).scalar()
             partner.rating = round(float(avg_rating), 1) if avg_rating else reservation.stars
-
         db.commit()
         return {"status": "success"}
-        
     except Exception as e:
         db.rollback()
         raise HTTPException(500, str(e))
 
-# ===============================
-# 15. 파트너 상세 및 리뷰 조회
-# ===============================
+
 @app.get("/partners/{garage_code}", tags=["Customer"])
 async def get_partner_detail(garage_code: str, db: Session = Depends(get_db)):
-    partner = db.query(Partner).filter(Partner.garage_code == garage_code).first()
-    return partner
+    return db.query(Partner).filter(Partner.garage_code == garage_code).first()
+
 
 @app.get("/partners/{garage_code}/reviews", tags=["Customer"])
 async def get_partner_reviews(garage_code: str, db: Session = Depends(get_db)):
@@ -605,9 +556,7 @@ async def get_partner_reviews(garage_code: str, db: Session = Depends(get_db)):
         Reservation.feedback != ""
     ).all()
 
-# ===============================
-# 16. 사용자 여정 로그
-# ===============================
+
 @customer_router.post("/userjourneylog", tags=["Customer"])
 async def create_user_journey_log(data: dict, db: Session = Depends(get_db)):
     try:
@@ -624,12 +573,53 @@ async def create_user_journey_log(data: dict, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(500, "로그 저장 실패")
 
+
+@coupon_router.get("/{customer_id}")
+async def get_customer_coupons(customer_id: str, db: Session = Depends(get_db)):
+    coupons = db.query(FreeAnalysisCoupon).filter(
+        FreeAnalysisCoupon.used_by_customer_id == customer_id,
+        FreeAnalysisCoupon.status == "ACTIVE"
+    ).all()
+    return coupons
+
+
+@coupon_router.post("/register")
+async def register_coupon(data: dict, db: Session = Depends(get_db)):
+    coupon_code = data.get("coupon_code")
+    customer_id = data.get("customer_id")
+    
+    if not coupon_code or not customer_id:
+        raise HTTPException(status_code=400, detail="필수 정보 누락")
+        
+    coupon = db.query(FreeAnalysisCoupon).filter(
+        FreeAnalysisCoupon.coupon_code == coupon_code
+    ).first()
+    
+    if not coupon:
+        raise HTTPException(status_code=404, detail="유효하지 않은 쿠폰 코드입니다.")
+        
+    if coupon.used_by_customer_id is not None:
+        raise HTTPException(status_code=400, detail="이미 등록되었거나 사용된 쿠폰입니다.")
+        
+    if coupon.status != "ACTIVE":
+        raise HTTPException(status_code=400, detail="사용할 수 없는 상태의 쿠폰입니다.")
+
+    try:
+        coupon.used_by_customer_id = customer_id
+        db.commit()
+        return {"status": "success", "message": "쿠폰이 정상적으로 등록되었습니다."}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ====================================================================
+# 5. API 라우터 일괄 등록 및 서버 구동
+# ====================================================================
 app.include_router(auth_router)
 app.include_router(admin_router)
 app.include_router(customer_router)
+app.include_router(payment_router)  
+app.include_router(coupon_router)   
 
-# ===============================
-# 17. 서버 실행 블록
-# ===============================
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=False)
