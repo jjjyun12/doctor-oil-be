@@ -104,7 +104,7 @@ class Reservation(Base):
     reservation_date = Column(Date)
     reservation_time = Column(Time)
     is_approved = Column(Boolean, nullable=True) 
-    note = Column(Text, nullable=True)          
+    note = Column(Text, nullable=True)           
     feedback = Column(Text, nullable=True)
     stars = Column(Float, nullable=True)
     reservation_candidate = Column(Text, nullable=True) 
@@ -156,6 +156,16 @@ class FreeAnalysisCoupon(Base):
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
+class FeedbackReport(Base):
+    __tablename__ = "feedback_reports"
+    __table_args__ = {'extend_existing': True}
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    reservation_id = Column(Integer, ForeignKey("reservations.id"), nullable=False)
+    partner_code = Column(String, index=True)
+    reason_detail = Column(Text, nullable=True)
+    status = Column(String, default="pending")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
 
 # 💡 [교정] 모든 릴레이션 관계 테이블이 파이썬 메모리에 완전히 적재된 후 자동 빌드를 시도해야 안전합니다.
 if engine:
@@ -178,6 +188,7 @@ auth_router = APIRouter(prefix="/auth", tags=["Auth"])
 admin_router = APIRouter(prefix="/admin/api", tags=["Admin"])
 customer_router = APIRouter(tags=["Customer"]) 
 coupon_router = APIRouter(prefix="/coupons", tags=["Coupon"]) 
+report_router = APIRouter(prefix="/reports", tags=["Report"])
 
 def get_coords(address: str):
     if not address: return None, None
@@ -196,6 +207,21 @@ def get_coords(address: str):
 # ====================================================================
 # 4. 엔드포인트 비즈니스 로직 정의
 # ====================================================================
+
+@report_router.post("")
+async def create_report(data: dict, db: Session = Depends(get_db)):
+    try:
+        new_report = FeedbackReport(
+            reservation_id=data.get("reservation_id"),
+            partner_code=data.get("partner_code"),
+            reason_detail=data.get("reason_detail")
+        )
+        db.add(new_report)
+        db.commit()
+        return {"status": "success", "message": "신고가 정상적으로 접수되었습니다."}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(500, detail=str(e))
 
 @auth_router.post("/login")
 async def login(data: dict, db: Session = Depends(get_db)):
@@ -620,6 +646,7 @@ app.include_router(admin_router)
 app.include_router(customer_router)
 app.include_router(payment_router)  
 app.include_router(coupon_router)   
+app.include_router(report_router)
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8001, reload=False)
